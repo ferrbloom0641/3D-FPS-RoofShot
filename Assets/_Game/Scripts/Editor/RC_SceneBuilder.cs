@@ -643,6 +643,7 @@ namespace RooftopContract.EditorTools
             detail.shieldTightenTime = mission.shieldTightenTime;
 
             int guardCount = Mathf.Clamp(mission.protectorCount, 1, map.guardPosts.Count);
+            var guardActors = new List<GameObject>();
             for (int i = 0; i < guardCount; i++)
             {
                 var post = map.guardPosts[i];
@@ -651,6 +652,7 @@ namespace RooftopContract.EditorTools
                 var guardPrefab = CastingConfig.Pick(casting.protectorPrefabs, i);
                 var guardActor = SpawnActor(guardPrefab, $"Protector_{i + 1}",
                     post.position, detailGo.transform, casting.protectorHealth);
+                guardActors.Add(guardActor);
                 var guard = guardActor.AddComponent<ProtectorGuard>();
                 bool usesPistol = (i % 2) == 1;
                 guard.usesPistol = usesPistol;
@@ -683,7 +685,39 @@ namespace RooftopContract.EditorTools
                 }
             }
 
+            if (map.motorcadeCars != null && map.motorcadeCars.Length > 0)
+                BuildMotorcadeArrival(map, detail, vip, guardActors);
+
             return vip;
+        }
+
+        /// <summary>
+        /// Puts the detail into the venue's motorcade: the guards ride in the car their post
+        /// belongs to, the target in the principal car, and they get out front to back.
+        /// </summary>
+        static void BuildMotorcadeArrival(RC_MapBuilder.MapRefs map, ProtectionDetail detail, VipTarget vip,
+            List<GameObject> guardActors)
+        {
+            const int principalCar = 1;
+            var passengers = new List<GameObject>();
+            for (int car = 0; car < map.motorcadeCars.Length; car++)
+            {
+                for (int i = 0; i < guardActors.Count; i++)
+                    if (i < map.guardPostCar.Count && map.guardPostCar[i] == car)
+                        passengers.Add(guardActors[i]);
+                if (car == principalCar) passengers.Add(vip.gameObject);
+            }
+
+            var arrival = map.motorcadeCars[0].parent.gameObject.AddComponent<MotorcadeArrival>();
+            arrival.cars = map.motorcadeCars;
+            arrival.passengers = passengers.ToArray();
+            arrival.detail = detail;
+            arrival.vip = vip;
+            arrival.heading = map.motorcadeHeading;
+            arrival.approachDistance = map.motorcadeApproach;
+            arrival.approachCue = map.motorcadeCue;
+
+            detail.holdForArrival = true;
         }
 
         static void AttachGuardWeapon(GameObject actor, string path, bool pistol)

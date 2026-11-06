@@ -95,6 +95,19 @@ namespace RooftopContract.EditorTools
             public bool targetOneWayRoute;
             /// <summary>Reaching the last waypoint means the target got out alive.</summary>
             public bool targetEscapesAtEnd;
+
+            /// <summary>
+            /// The motorcade the target arrives in, built where it comes to rest: lead, principal,
+            /// rear. Null for venues where the target is already on site.
+            /// </summary>
+            public Transform[] motorcadeCars;
+            /// <summary>Which motorcade car the occupant of each guard post rides in, index-aligned with guardPosts.</summary>
+            public List<int> guardPostCar = new List<int>();
+            /// <summary>Which way the motorcade drives, and how far it travels to reach its stops.</summary>
+            public Vector3 motorcadeHeading;
+            public float motorcadeApproach;
+            /// <summary>Radio line for the moment the motorcade sets off.</summary>
+            public string motorcadeCue;
         }
 
         [MenuItem("Rooftop Contract/도구/씬 — 맵만 생성", priority = 1)]
@@ -216,23 +229,30 @@ namespace RooftopContract.EditorTools
 
             // Corridor framing: two tall slabs either side of the sightline so the shot has to be
             // threaded between them. This is what turns "a rooftop" into "the only rooftop".
-            var corridorL = RC_BuildUtil.PlaceScaledToHeight(buildings[2 % buildings.Count], group.transform,
-                new Vector3(-34f, 0f, -150f), 66f, 15f);
-            corridorL.name = "Tower_CorridorL";
-            var corridorR = RC_BuildUtil.PlaceScaledToHeight(buildings[5 % buildings.Count], group.transform,
-                new Vector3(38f, 0f, -108f), 58f, -20f);
-            corridorR.name = "Tower_CorridorR";
-            // One mid-height block that clips the right-hand third of the terrace approach,
-            // so lateral position on the nest actually changes what the player can see.
-            var occluder = RC_BuildUtil.PlaceScaledToHeight(buildings[8 % buildings.Count], group.transform,
-                new Vector3(26f, 0f, -46f), 40f, 8f);
-            occluder.name = "Tower_Occluder";
-
-            if (Venue == TargetVenue.RooftopTerrace)
+            //
+            // The street contract replaces all three with the boulevard walls (BuildBoulevard):
+            // three loose towers at odd angles were exactly the "everything looks like a clue"
+            // view, and two of them would stand inside the boulevard's building line.
+            if (Venue != TargetVenue.StreetWalk)
             {
-                SightlineColliderFitter.FitToVisibleMeshes(corridorL, true);
-                SightlineColliderFitter.FitToVisibleMeshes(corridorR, true);
-                SightlineColliderFitter.FitToVisibleMeshes(occluder, true);
+                var corridorL = RC_BuildUtil.PlaceScaledToHeight(buildings[2 % buildings.Count], group.transform,
+                    new Vector3(-34f, 0f, -150f), 66f, 15f);
+                corridorL.name = "Tower_CorridorL";
+                var corridorR = RC_BuildUtil.PlaceScaledToHeight(buildings[5 % buildings.Count], group.transform,
+                    new Vector3(38f, 0f, -108f), 58f, -20f);
+                corridorR.name = "Tower_CorridorR";
+                // One mid-height block that clips the right-hand third of the terrace approach,
+                // so lateral position on the nest actually changes what the player can see.
+                var occluder = RC_BuildUtil.PlaceScaledToHeight(buildings[8 % buildings.Count], group.transform,
+                    new Vector3(26f, 0f, -46f), 40f, 8f);
+                occluder.name = "Tower_Occluder";
+
+                if (Venue == TargetVenue.RooftopTerrace)
+                {
+                    SightlineColliderFitter.FitToVisibleMeshes(corridorL, true);
+                    SightlineColliderFitter.FitToVisibleMeshes(corridorR, true);
+                    SightlineColliderFitter.FitToVisibleMeshes(occluder, true);
+                }
             }
 
             // Filler skyline on a jittered grid, skipping the sightline corridor and the two towers.
@@ -246,8 +266,19 @@ namespace RooftopContract.EditorTools
                     cell += new Vector3(Random.Range(-14f, 14f), 0f, Random.Range(-12f, 12f));
                     float height = Random.Range(18f, 74f);
                     var prefab = buildings[Random.Range(0, buildings.Count)];
-                    var go = RC_BuildUtil.PlaceScaledToHeight(prefab, group.transform, cell, height,
-                        Random.Range(0, 4) * 90f);
+                    float yaw = Random.Range(0, 4) * 90f;
+
+                    // The street contract edits two things out of its skyline. Both are decided
+                    // after this cell's random numbers are drawn, so every other cell comes out
+                    // exactly as it did before.
+                    if (Venue == TargetVenue.StreetWalk)
+                    {
+                        // Bld_-1_2 stands in the view down the boulevard.
+                        if (gx == -1 && gz == 2) continue;
+                        prefab = NotParkingGarage(prefab, buildings);
+                    }
+
+                    var go = RC_BuildUtil.PlaceScaledToHeight(prefab, group.transform, cell, height, yaw);
                     if (go != null)
                     {
                         go.name = $"Bld_{gx}_{gz}";
@@ -260,7 +291,161 @@ namespace RooftopContract.EditorTools
                 }
             }
 
+            // After the filler, so the filler grid draws the same random numbers it always has.
+            if (Venue == TargetVenue.StreetWalk) BuildBoulevard(group.transform, buildings);
+
             RC_BuildUtil.MarkStaticRecursive(group);
+        }
+
+        // ------------------------------------------------------------------ boulevard (street contract)
+
+        // Asphalt from the centre line to the kerb, and the pavement between kerb and building line.
+        const float BoulevardHalfWidth = 20f;
+        const float BoulevardPavement = 6f;
+        static float BoulevardBuildingLine => BoulevardHalfWidth + BoulevardPavement;
+
+        // The cross street the boulevard runs into. Its carriageway is BuildGround's Road_H at
+        // z −10 (−EngagementRange/2 + 140 for the street contract's 300m), 14m wide; the street
+        // venue owns the pavement on the far side and BuildStreetVenue adds the near one.
+        const float CrossStreetNearZ = -17f, CrossStreetFarZ = -3f;
+        const float CrossStreetNearPavementZ = -21f;
+
+        /// <summary>
+        /// Contract 2's sightline runs straight down one wide boulevard with an unbroken wall of
+        /// buildings on each side, ending on the cross street where the target walks.
+        ///
+        /// From the nest the old layout was open city in every direction — towers at odd angles,
+        /// gaps, roofs — and every one of them looked as much like "the place" as the street did.
+        /// A canyon has one end. The eye runs down the road to the frontage at the bottom of it,
+        /// and that is where the drop-off and the walk are.
+        ///
+        /// The walls stop short at both ends, for two different reasons:
+        ///   · near end: the extraction helicopter banks in over the left-hand side between
+        ///     roughly 25 and 55m from the nest, at about 60m up. Nothing may stand there.
+        ///   · far end: the cross street (Road_H, z −17..−3) and its near pavement (z −21..−17)
+        ///     have to stay open, or the walls would close over the road the motorcade arrives on.
+        /// From the nest, the mouth this leaves shows about ±27m of the cross street — the whole
+        /// stop (x −26.5..−6) and the walk until the right-hand wall closes over it at about
+        /// x +28, which is the street contract's deadline.
+        ///
+        /// Built under the skyline, never under the venue: the NavMesh bake treats every mesh
+        /// under the venue as ground.
+        /// </summary>
+        static void BuildBoulevard(Transform parent, List<GameObject> buildings)
+        {
+            var group = RC_BuildUtil.Empty(parent, "Boulevard").transform;
+
+            float startZ = NestCenter.z + 65f;
+            const float endZ = CrossStreetNearPavementZ;
+            float length = endZ - startZ;
+            float midZ = (startZ + endZ) * 0.5f;
+
+            // Same material and height as the city's other roads, so where it overlaps them the
+            // two surfaces are indistinguishable rather than fighting. It runs on to the cross
+            // street's near edge, so the boulevard meets it as a T-junction.
+            float roadStart = startZ - 15f;
+            RC_BuildUtil.Box(group, "Boulevard_Road", new Vector3(0f, 0.02f, (roadStart + CrossStreetNearZ) * 0.5f),
+                new Vector3(BoulevardHalfWidth * 2f, 0.06f, CrossStreetNearZ - roadStart), RC_Palette.ConcreteDark, 0f, false);
+            foreach (float side in new[] { -1f, 1f })
+            {
+                RC_BuildUtil.Box(group, side < 0 ? "Boulevard_PavementL" : "Boulevard_PavementR",
+                    new Vector3(side * (BoulevardHalfWidth + BoulevardPavement * 0.5f), 0.09f, midZ),
+                    new Vector3(BoulevardPavement, 0.18f, length), RC_Palette.Concrete, 0f, false);
+            }
+
+            if (buildings.Count == 0) return;
+
+            // Tall enough to fill the sides of the frame from a 59m eye, short enough that the
+            // nearest ones do not tower over the nest.
+            const float minHeight = 42f, maxHeight = 72f;
+            // How far back from the building line a block may run, and how much frontage it may
+            // take. A pack prefab scaled to wall height can come out 80m wide; past these it is
+            // swapped for another, and failing that shrunk.
+            const float maxDepth = 30f, maxFrontage = 34f;
+            const float gap = 0.6f;
+
+            foreach (float side in new[] { -1f, 1f })
+            {
+                float z = startZ;
+                int n = 0;
+                while (z < endZ - 6f)
+                {
+                    float height = Random.Range(minHeight, maxHeight);
+                    float yaw = Random.Range(0, 4) * 90f;
+                    GameObject prefab = null;
+                    float scale = 1f;
+                    Vector2 footprint = Vector2.zero;   // x = depth from the line, y = frontage along z
+                    for (int attempt = 0; attempt < 8; attempt++)
+                    {
+                        prefab = buildings[Random.Range(0, buildings.Count)];
+                        // Treated as never fitting, so the draw moves on exactly as it would
+                        // for an oversized block.
+                        if (IsParkingGarage(prefab)) continue;
+                        footprint = FootprintAt(prefab, yaw, height, out scale);
+                        if (footprint.x <= maxDepth && footprint.y <= maxFrontage) break;
+                    }
+                    prefab = NotParkingGarage(prefab, buildings);
+                    footprint = FootprintAt(prefab, yaw, height, out scale);
+                    float fit = Mathf.Min(1f, maxDepth / footprint.x, maxFrontage / footprint.y);
+                    if (fit < 1f)
+                    {
+                        height *= fit;
+                        footprint = FootprintAt(prefab, yaw, height, out scale);
+                    }
+
+                    // The last block is not allowed to run out over the cross street.
+                    if (z + footprint.y > endZ)
+                    {
+                        float shrink = (endZ - z) / footprint.y;
+                        height *= shrink;
+                        footprint = FootprintAt(prefab, yaw, height, out scale);
+                    }
+
+                    // Put the measured footprint's inner edge on the building line, whatever
+                    // the prefab's pivot is.
+                    Bounds b = RC_BuildUtil.MeasurePrefab(prefab);
+                    Vector3 pivotOffset = Quaternion.Euler(0f, yaw, 0f) * new Vector3(b.center.x, 0f, b.center.z) * scale;
+                    Vector3 centre = new Vector3(side * (BoulevardBuildingLine + footprint.x * 0.5f), 0f,
+                        z + footprint.y * 0.5f);
+                    var go = RC_BuildUtil.PlaceScaledToHeight(prefab, group, centre - pivotOffset, height, yaw);
+                    if (go != null) go.name = $"Bld_Boulevard{(side < 0 ? "L" : "R")}_{n++}";
+
+                    z += footprint.y + gap;
+                }
+            }
+        }
+
+        /// <summary>
+        /// A prefab's ground footprint once scaled to <paramref name="height"/> and turned by a
+        /// multiple of 90 degrees: x across the boulevard, y along it.
+        /// </summary>
+        static Vector2 FootprintAt(GameObject prefab, float yaw, float height, out float scale)
+        {
+            Bounds b = RC_BuildUtil.MeasurePrefab(prefab);
+            scale = height / Mathf.Max(0.01f, b.size.y);
+            bool turned = Mathf.RoundToInt(yaw / 90f) % 2 != 0;
+            float sx = (turned ? b.size.z : b.size.x) * scale;
+            float sz = (turned ? b.size.x : b.size.z) * scale;
+            return new Vector2(sx, sz);
+        }
+
+        // Building7 is the pack's parking garage — the only prefab with no glass, floored in the
+        // road material. Down the street contract's boulevard it reads as a landmark, the "P"
+        // sign at the end of the canyon, so that contract swaps it for the next prefab along.
+        const string ParkingGaragePrefab = "Building7";
+
+        static bool IsParkingGarage(GameObject prefab) => prefab != null && prefab.name == ParkingGaragePrefab;
+
+        static GameObject NotParkingGarage(GameObject prefab, List<GameObject> buildings)
+        {
+            if (!IsParkingGarage(prefab)) return prefab;
+            int i = buildings.IndexOf(prefab);
+            for (int step = 1; step < buildings.Count; step++)
+            {
+                var next = buildings[(i + step) % buildings.Count];
+                if (!IsParkingGarage(next)) return next;
+            }
+            return prefab;
         }
 
         static bool IsReserved(Vector3 cell)
@@ -313,6 +498,9 @@ namespace RooftopContract.EditorTools
                     // one parked on top of them is at best redundant and at worst a car sitting
                     // in the middle of the pavement the target has to walk down.
                     if (IsInsideStreetVenue(x, z)) continue;
+                    // The street contract opens on an empty road: the only cars in the view down
+                    // the boulevard are the three that bring the target in.
+                    if (Venue == TargetVenue.StreetWalk && Mathf.Abs(x) < BoulevardBuildingLine) continue;
                     var prefab = cars[Random.Range(0, cars.Count)];
                     var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, group.transform);
                     if (go == null) continue;
@@ -325,10 +513,13 @@ namespace RooftopContract.EditorTools
 
             if (streetlight != null)
             {
+                // On the street contract the road under the sightline is the boulevard, and
+                // ±9 would stand the lamps in the middle of its lanes. Move them to its kerbs.
+                float lampX = Venue == TargetVenue.StreetWalk ? BoulevardHalfWidth + 1f : 9f;
                 for (int i = 0; i < 26; i++)
                 {
                     float z = -EngagementRange - 30f + i * 12f;
-                    foreach (float side in new[] { -9f, 9f })
+                    foreach (float side in new[] { -lampX, lampX })
                     {
                         if (IsInsideStreetVenue(side, z)) continue;
                         var go = (GameObject)PrefabUtility.InstantiatePrefab(streetlight, group.transform);
@@ -426,21 +617,30 @@ namespace RooftopContract.EditorTools
         // ------------------------------------------------------------------ street venue
 
         /// <summary>
-        /// Contract 2 — the target on foot, at street level, crossing the sight line.
+        /// Contract 2 — the target arrives by motorcade at the end of the boulevard and walks
+        /// off along the far pavement, crossing the sight line.
         ///
-        /// The whole mission is one design decision: he walks along X, and the player is looking
-        /// down Z. Every metre he covers is a metre of pure lateral motion, so the shot has to be
-        /// led — at 300m the round is in the air for 0.75s and a 1.2 m/s walk has moved him most
-        /// of a body width by the time it arrives. On the terrace the player learned to hold
-        /// still; here that habit misses.
+        /// The road is empty when the mission opens. Three cars — black lead and rear, the
+        /// target's own between them — come in from behind the right-hand wall along the far
+        /// lanes of the cross street and pull up at the far kerb on the left of the view:
+        /// guards out of the lead car, the target out of the middle one, more guards out of the
+        /// rear one. The arrival *is* the "where does he come from" — the player watches it
+        /// happen down the one road the map points at.
         ///
-        ///   x −20 ────────────── 인도 (표적 진행 방향 →) ────────────── x +18  로비 입구
-        ///     ▲ 하차 지점                                                  ▲ 도착 = 계약 종료
-        ///     └ z = +1.5 인도 라인.  z = −4.5 에 주차 차량·버스쉘터·가로수 = 간헐적 차폐
+        /// Once out he walks right, back the way the cars came, and is gone when the right-hand
+        /// wall closes over him. He goes into nothing — the wall is the deadline, and the player
+        /// can see exactly how much pavement is left. Every metre of the walk is pure lateral
+        /// motion against a player looking down Z, so the shot has to be led — at 300m the round
+        /// is in the air for 0.75s and a 1.2 m/s walk has moved him most of a body width by the
+        /// time it arrives. Stopping the column at the far left of the mouth gives that walk
+        /// about 48m, some 40 seconds in view.
         ///
-        /// The occluders all sit between the pavement and the nest, so they cut the window open
-        /// and closed while he walks rather than hiding him outright. The player is choosing
-        /// *when*, not whether.
+        ///   하차 x −16.4 ──── 인도 (z = +1.5, 표적 진행 방향 →) ──── x +28 벽 뒤로 사라짐 · x +32 이탈
+        ///   ─────────────────── 연석 z −2.1 ────────────────────────────────────
+        ///   [앞차 −24] [표적 차 −17] [뒤차 −9.5]   ◀── 진입 (x +32 에서 출발)   z −4.75 차로
+        ///   ─────────────────── 중앙선 z −10 ───────────────────────────────────
+        ///                                 맞은편 2차로
+        ///   ─────────────────── 인도 z −21..−17 (대로 입구 좌우) ──────────────────
         /// </summary>
         static GameObject BuildStreetVenue(Transform root, MapRefs refs)
         {
@@ -448,104 +648,107 @@ namespace RooftopContract.EditorTools
             var t = group.transform;
 
             const float walkZ = 1.5f;        // the pavement line the target walks
-            const float screenZ = -4.5f;     // kerbside clutter, between him and the nest
-
-            // startX was -20, which put eleven seconds of walking between the mission starting
-            // and the target being anywhere the player could act on him — dead time spent
-            // watching a dot in the corner of the scope. Six metres closer, and the first
-            // waypoint pulled in to match, cuts the approach to about five seconds: long enough
-            // to find him and settle the crosshair, short enough that nobody puts the controller
-            // down. The rest of the walk is untouched, so the shooting window is the same length.
-            const float startX = -14f, endX = 18f;
+            const float stopLaneZ = -4.75f;  // centre of the kerbside lane the motorcade stops in
+            // From the nest the right-hand wall closes over the walk line at about x +28. The
+            // end of the walk is a few metres past that, so he is out of sight before he counts
+            // as gone.
+            const float exitX = 32f;
 
             // Pavement. Raised 0.18 so it reads as a kerb from 300m and, more importantly, so
             // the NavMesh bake has a surface of its own rather than trying to walk the ground
-            // slab that runs under the entire city.
-            var walk = RC_BuildUtil.Box(t, "Surface", TerraceCenter + new Vector3(-1f, 0.09f, walkZ),
-                new Vector3(52f, 0.18f, 7f), RC_Palette.Concrete);
+            // slab that runs under the entire city. Wider than the boulevard's mouth (about
+            // ±27m from the nest) so its ends never show.
+            var walk = RC_BuildUtil.Box(t, "Surface", TerraceCenter + new Vector3(0f, 0.09f, walkZ),
+                new Vector3(80f, 0.18f, 7f), RC_Palette.Concrete);
             refs.terraceSurface = walk.transform;
-            RC_BuildUtil.Box(t, "Kerb", TerraceCenter + new Vector3(-1f, 0.09f, walkZ - 3.6f),
-                new Vector3(52f, 0.2f, 0.5f), RC_Palette.ConcreteDark, 0f, false);
+            RC_BuildUtil.Box(t, "Kerb", TerraceCenter + new Vector3(0f, 0.09f, walkZ - 3.6f),
+                new Vector3(80f, 0.2f, 0.5f), RC_Palette.ConcreteDark, 0f, false);
 
-            // The frontage he is walking along, and the lobby he is walking into. Behind him
-            // from the player's view, so it is also the backdrop that makes him legible.
-            RC_BuildUtil.Box(t, "Frontage", TerraceCenter + new Vector3(-4f, 7f, walkZ + 8.5f),
-                new Vector3(46f, 14f, 10f), RC_Palette.Concrete);
-            RC_BuildUtil.Box(t, "Lobby", TerraceCenter + new Vector3(endX + 3f, 4.5f, walkZ + 5f),
-                new Vector3(12f, 9f, 6f), RC_Palette.ConcreteDark);
-            RC_BuildUtil.Box(t, "Lobby_Door", TerraceCenter + new Vector3(endX + 1f, 1.4f, walkZ + 2.05f),
-                new Vector3(3.2f, 2.8f, 0.2f), RC_Palette.DoorDark, 0f, false);
-            RC_BuildUtil.Box(t, "Lobby_Canopy", TerraceCenter + new Vector3(endX + 1f, 3.1f, walkZ + 0.6f),
-                new Vector3(6.5f, 0.3f, 3.4f), RC_Palette.Metal, 0f, false);
-
-            // ---- the intermittent screen ---------------------------------------------
-            //
-            // Deliberately gapped. Three solid blocks with 4–6m of clear pavement between them
-            // gives roughly two seconds of visibility per gap at walking pace, which is about
-            // one aimed shot including the bolt cycle.
-            AddParkedCar(t, "Car_A", TerraceCenter + new Vector3(-14f, 0f, screenZ), 0f);
-            AddParkedCar(t, "Car_B", TerraceCenter + new Vector3(-4.5f, 0f, screenZ), 0f);
-            AddParkedCar(t, "Car_C", TerraceCenter + new Vector3(11f, 0f, screenZ), 0f);
-
-            // Bus shelter: taller than a car, so it screens his head as well as his chest.
-            RC_BuildUtil.Box(t, "Shelter_Roof", TerraceCenter + new Vector3(3.5f, 2.6f, screenZ + 1.2f),
-                new Vector3(6f, 0.22f, 2.6f), RC_Palette.Metal);
-            foreach (float px in new[] { 0.7f, 6.3f })
-                RC_BuildUtil.Box(t, "Shelter_Post", TerraceCenter + new Vector3(px, 1.3f, screenZ + 1.2f),
-                    new Vector3(0.22f, 2.6f, 0.22f), RC_Palette.Metal, 0f, false);
-            RC_BuildUtil.Box(t, "Shelter_Panel", TerraceCenter + new Vector3(3.5f, 1.2f, screenZ + 0.1f),
-                new Vector3(5.6f, 2.2f, 0.14f), RC_Palette.Glass, 0f, false);
+            // The frontage closing off the far side of the street. Behind him from the player's
+            // view, so it is also the backdrop that makes him legible. There is no lobby and no
+            // bus shelter any more: he walks into nothing, and nothing on the pavement hides him.
+            RC_BuildUtil.Box(t, "Frontage", TerraceCenter + new Vector3(0f, 7f, walkZ + 8.5f),
+                new Vector3(80f, 14f, 10f), RC_Palette.Concrete);
 
             // Street trees on the kerb line. Canopies at head height are the fiddliest occluder
             // in the mission — they hide the head but not the body, which is exactly the shot
-            // the player does not want to take.
-            foreach (float tx in new[] { -18.5f, -9f, 7f })
+            // the player does not want to take. The trunks stand clear of the stop lane.
+            foreach (float tx in new[] { -28f, -9f, 7f })
             {
-                RC_BuildUtil.Cylinder(t, "Tree_Trunk", TerraceCenter + new Vector3(tx, 1.6f, screenZ + 2.2f),
+                RC_BuildUtil.Cylinder(t, "Tree_Trunk", TerraceCenter + new Vector3(tx, 1.6f, -2.3f),
                     0.22f, 3.2f, RC_Palette.RustMetal);
-                RC_BuildUtil.Cylinder(t, "Tree_Canopy", TerraceCenter + new Vector3(tx, 3.6f, screenZ + 2.2f),
+                RC_BuildUtil.Cylinder(t, "Tree_Canopy", TerraceCenter + new Vector3(tx, 3.6f, -2.3f),
                     1.7f, 1.6f, RC_Palette.Foliage, false);
             }
 
-            // The car he stepped out of, at the far end. It is also the nearest hard cover once
-            // the shooting starts, which is why the evac points hang off it.
-            AddParkedCar(t, "Car_Motorcade", TerraceCenter + new Vector3(startX - 3f, 0f, screenZ + 0.4f), 0f);
+            BuildCrossStreet(root);
+
+            // ---- the motorcade -------------------------------------------------------------
+            //
+            // Built at the stops so the scene reads correctly in the editor; MotorcadeArrival
+            // rolls it back out of view at the start and drives it in. Parented to the map root,
+            // not the venue: the NavMesh bake would turn three cars into walkable islands, and
+            // the venue is marked static, which a moving car must not be.
+            //
+            // Heading −X in the kerbside lane on the far side, so the doors on the right open
+            // onto the pavement.
+            var motorcade = RC_BuildUtil.Empty(root, "Motorcade").transform;
+            const float carYaw = -90f;
+            // Stopped at the far left of the mouth, which shows the stop lane to about x ±27.6:
+            // the lead car's nose (x −26.5) is just inside it. The rear car is the 6.5m military
+            // vehicle, so it sits 7.5m back rather than 7.
+            refs.motorcadeCars = new[]
+            {
+                AddMotorcadeCar(motorcade, "Car_Lead", "Classic Car_9",
+                    TerraceCenter + new Vector3(-24f, 0.05f, stopLaneZ), carYaw, true),
+                AddMotorcadeCar(motorcade, "Car_Principal", "N_Muscle Car_10",
+                    TerraceCenter + new Vector3(-17f, 0.05f, stopLaneZ), carYaw, false),
+                AddMotorcadeCar(motorcade, "Car_Rear", "Military Vehicle_3",
+                    TerraceCenter + new Vector3(-9.5f, 0.05f, stopLaneZ), carYaw, true),
+            };
+            refs.motorcadeHeading = Vector3.left;
+            // From x +32 to −24 for the lead car, so the whole column — the rear car starts at
+            // +46.5 — sets off hidden behind the right-hand wall.
+            refs.motorcadeApproach = 56f;
+            refs.motorcadeCue = "차량 3대 접근 중. 우측 차로에서 들어온다.";
 
             // ---- route ----------------------------------------------------------------
             float y = 0.18f;
-            AddPoint(t, refs.vipWaypoints, "VIP_WP_Start", TerraceCenter + new Vector3(startX, y, walkZ));
+            // Out of the principal car's rear door, onto the walking line, then right until the
+            // wall takes him.
+            AddPoint(t, refs.vipWaypoints, "VIP_WP_Start", TerraceCenter + new Vector3(-16.4f, y, -1.0f));
             AddPoint(t, refs.vipWaypoints, "VIP_WP_Mid1", TerraceCenter + new Vector3(-8f, y, walkZ));
-            AddPoint(t, refs.vipWaypoints, "VIP_WP_Mid2", TerraceCenter + new Vector3(5f, y, walkZ));
-            AddPoint(t, refs.vipWaypoints, "VIP_WP_Lobby", TerraceCenter + new Vector3(endX, y, walkZ));
+            AddPoint(t, refs.vipWaypoints, "VIP_WP_Mid2", TerraceCenter + new Vector3(14f, y, walkZ));
+            AddPoint(t, refs.vipWaypoints, "VIP_WP_Exit", TerraceCenter + new Vector3(exitX, y, walkZ));
 
             // What the player is being told to look at, in the order the walk presents it. The
-            // second and third lines name the actual props the route passes, so the commentary
-            // is navigation rather than mood.
-            refs.routeCues.Add("표적 하차 확인. 좌측 인도를 따라 로비로 이동한다.");
-            refs.routeCues.Add("주차 차량 구간 진입. 시야가 열리는 순간을 노려라.");
-            refs.routeCues.Add("버스 정류장 통과. 로비 진입이 임박했다.");
-            refs.routeCues.Add("표적이 로비에 진입했다. 임무 실패.");
+            // first fires the moment he is out of the car (RouteNarrator announces a waypoint on
+            // departure); the motorcade's own approach line comes from MotorcadeArrival.
+            refs.routeCues.Add("정차. 중간 차량에서 표적 하차 확인.");
+            refs.routeCues.Add("표적이 인도를 따라 우측으로 이동한다.");
+            refs.routeCues.Add("표적이 우측 건물 뒤로 빠지기 직전이다.");
+            refs.routeCues.Add("표적이 시야에서 사라졌다. 임무 실패.");
 
-            AddPoint(t, refs.vipEvacPoints, "VIP_EVAC_Lobby", TerraceCenter + new Vector3(endX + 1f, y, walkZ + 1.2f));
-            // Kept on the pavement, not out by the car: the evac goal is fed straight to a
-            // NavMeshAgent, and a point past the kerb is off the only baked surface here.
-            AddPoint(t, refs.vipEvacPoints, "VIP_EVAC_Motorcade", TerraceCenter + new Vector3(startX - 4f, y, walkZ - 1.4f));
+            AddPoint(t, refs.vipEvacPoints, "VIP_EVAC_Exit", TerraceCenter + new Vector3(exitX, y, walkZ));
+            // Back to the car he came in — on the pavement beside it, not out in the lane: the
+            // evac goal is fed straight to a NavMeshAgent, and the road is not baked.
+            AddPoint(t, refs.vipEvacPoints, "VIP_EVAC_Motorcade", TerraceCenter + new Vector3(-17f, y, -1.4f));
 
-            // Guards spread along the walk. They start ahead of and behind him rather than
-            // ringing him, because that is what a moving detail looks like — and it means the
-            // shield has to actually form when the shooting starts.
-            AddPoint(t, refs.guardPosts, "Post_1", TerraceCenter + new Vector3(startX + 3.5f, y, walkZ + 1.6f));
-            AddPoint(t, refs.guardPosts, "Post_2", TerraceCenter + new Vector3(startX - 2.5f, y, walkZ - 0.8f));
-            AddPoint(t, refs.guardPosts, "Post_3", TerraceCenter + new Vector3(startX + 1f, y, walkZ - 2.2f));
-            AddPoint(t, refs.guardPosts, "Post_4", TerraceCenter + new Vector3(startX + 6f, y, walkZ - 1.2f));
-            AddPoint(t, refs.guardPosts, "Post_5", TerraceCenter + new Vector3(startX - 4f, y, walkZ + 1.8f));
-            AddPoint(t, refs.guardPosts, "Post_6", TerraceCenter + new Vector3(startX + 4f, y, walkZ + 2.4f));
+            // Guards stand where they get out: beside the lead car's doors (0) and the rear
+            // car's (2). A mission uses the first protectorCount posts, so the order alternates
+            // ends of the column — four guards is two out of each car, not four out of one.
+            AddGuardPost(t, refs, "Post_1", new Vector3(-24.8f, y, -1.0f), 0);
+            AddGuardPost(t, refs, "Post_2", new Vector3(-23.4f, y, -0.6f), 0);
+            AddGuardPost(t, refs, "Post_3", new Vector3(-10.3f, y, -1.0f), 2);
+            AddGuardPost(t, refs, "Post_4", new Vector3(-8.9f, y, -0.6f), 2);
+            AddGuardPost(t, refs, "Post_5", new Vector3(-9.6f, y, 0.2f), 2);
+            AddGuardPost(t, refs, "Post_6", new Vector3(-24.1f, y, 0.2f), 0);
 
             for (int i = 0; i < 3; i++)
                 AddPoint(t, refs.civilianPosts, $"Civ_Post_{i}",
                     TerraceCenter + new Vector3(14f - i * 9f, y, walkZ + 2.4f));
 
-            refs.targetSpawn = TerraceCenter + new Vector3(startX, y, walkZ);
+            refs.targetSpawn = refs.vipWaypoints[0].position;
             refs.targetOneWayRoute = true;
             refs.targetEscapesAtEnd = true;
 
@@ -553,29 +756,97 @@ namespace RooftopContract.EditorTools
             return group;
         }
 
-        /// <summary>A kit car, retextured and scaled to match the rest of the street furniture.</summary>
-        static void AddParkedCar(Transform parent, string name, Vector3 pos, float yaw)
+        static void AddGuardPost(Transform parent, MapRefs refs, string name, Vector3 offset, int car)
         {
-            const string kitFolder =
-                "Assets/KayKit_City_Builder_Bits_1.0_FREE/KayKit_City_Builder_Bits_1.0_FREE/Assets/fbx (unity)";
-            string[] names = { "car_sedan", "car_taxi", "car_stationwagon", "car_hatchback" };
-            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>(
-                $"{kitFolder}/{names[Random.Range(0, names.Length)]}.fbx");
-            if (prefab == null)
+            AddPoint(parent, refs.guardPosts, name, TerraceCenter + offset);
+            refs.guardPostCar.Add(car);
+        }
+
+        /// <summary>
+        /// Dresses the cross street as a two-way, four-lane road: centre line, lane lines, and a
+        /// pavement on the near side either side of the boulevard's mouth (the far pavement is
+        /// the venue's own). Not under the venue — none of this is anywhere anyone walks, and
+        /// the NavMesh bake treats every mesh under the venue as ground.
+        /// </summary>
+        static void BuildCrossStreet(Transform root)
+        {
+            var group = RC_BuildUtil.Empty(root, "CrossStreet");
+            var t = group.transform;
+
+            const float halfLength = 60f;    // well past the ±27m the boulevard's mouth shows
+            float centreZ = (CrossStreetNearZ + CrossStreetFarZ) * 0.5f;
+            float laneWidth = (CrossStreetFarZ - CrossStreetNearZ) / 4f;
+            // On top of Road_H (top face at y 0.05).
+            const float markY = 0.06f, markH = 0.02f;
+
+            var yellow = RC_Palette.Get("RC_RoadYellow", new Color(0.86f, 0.68f, 0.12f), 0.3f);
+            var white = RC_Palette.Get("RC_RoadWhite", new Color(0.88f, 0.88f, 0.86f), 0.3f);
+
+            // Double yellow centre line.
+            foreach (float dz in new[] { -0.14f, 0.14f })
+                RC_BuildUtil.Box(t, "Line_Centre", new Vector3(0f, markY, centreZ + dz),
+                    new Vector3(halfLength * 2f, markH, 0.15f), yellow, 0f, false);
+
+            // Dashed lane lines between the two lanes on each side: 3m dash, 5m gap.
+            foreach (float lz in new[] { CrossStreetNearZ + laneWidth, CrossStreetFarZ - laneWidth })
+                for (float x = -halfLength; x < halfLength; x += 8f)
+                    RC_BuildUtil.Box(t, "Line_Lane", new Vector3(x + 1.5f, markY, lz),
+                        new Vector3(3f, markH, 0.15f), white, 0f, false);
+
+            // Near pavement, either side of the T-junction.
+            float pavementDepth = CrossStreetNearZ - CrossStreetNearPavementZ;
+            float pavementZ = (CrossStreetNearZ + CrossStreetNearPavementZ) * 0.5f;
+            float pavementLength = halfLength - BoulevardHalfWidth;
+            foreach (float side in new[] { -1f, 1f })
             {
-                // The kit is optional dressing everywhere else, but here the cars *are* the
-                // cover, so a missing pack still has to leave something solid on the kerb.
-                RC_BuildUtil.Box(parent, name, pos + new Vector3(0f, 0.8f, 0f),
-                    new Vector3(4.6f, 1.6f, 2.0f), RC_Palette.RustMetal, yaw);
-                return;
+                RC_BuildUtil.Box(t, side < 0 ? "NearPavementL" : "NearPavementR",
+                    new Vector3(side * (BoulevardHalfWidth + pavementLength * 0.5f), 0.09f, pavementZ),
+                    new Vector3(pavementLength, 0.18f, pavementDepth), RC_Palette.Concrete, 0f, false);
+                RC_BuildUtil.Box(t, side < 0 ? "NearKerbL" : "NearKerbR",
+                    new Vector3(side * (BoulevardHalfWidth + pavementLength * 0.5f), 0.09f, CrossStreetNearZ - 0.25f),
+                    new Vector3(pavementLength, 0.2f, 0.5f), RC_Palette.ConcreteDark, 0f, false);
             }
 
+            RC_BuildUtil.MarkStaticRecursive(group);
+        }
+
+        const string MotorcadeCarFolder = "Assets/Awbmecreations/Mobile Optimize-Free Low Poly Cars/Prefabs";
+
+        /// <summary>
+        /// One motorcade car, at its stop. The Awbme models are built in metres with the nose
+        /// on +Z (their FR tyre sits at +X, +Z), so they go in at native scale and yaw −90
+        /// points them down −X. Placed by measured bounds, so the car's centre is on the stop
+        /// and its wheels are on the road whatever the prefab's pivot.
+        /// </summary>
+        static Transform AddMotorcadeCar(Transform parent, string name, string model, Vector3 stop,
+            float yaw, bool paintBlack)
+        {
+            var rot = Quaternion.Euler(0f, yaw, 0f);
+            var prefab = AssetDatabase.LoadAssetAtPath<GameObject>($"{MotorcadeCarFolder}/{model}.prefab");
+            if (prefab == null)
+            {
+                Debug.LogWarning($"[Rooftop Contract] {model} not found in {MotorcadeCarFolder} — box stand-in.");
+                var stand = RC_BuildUtil.Box(parent, name, stop + Vector3.up * 0.75f,
+                    new Vector3(1.9f, 1.5f, 4.8f), RC_Palette.DoorDark, yaw);
+                return stand.transform;
+            }
+
+            Bounds b = RC_BuildUtil.MeasurePrefab(prefab);
             var go = (GameObject)PrefabUtility.InstantiatePrefab(prefab, parent);
             go.name = name;
-            go.transform.position = pos;
-            go.transform.rotation = Quaternion.Euler(0f, yaw, 0f);
-            go.transform.localScale = Vector3.one * 3.2f;
-            Retexture(go, RC_Palette.CityBits);
+            Vector3 centre = rot * new Vector3(b.center.x, 0f, b.center.z);
+            go.transform.SetPositionAndRotation(new Vector3(stop.x - centre.x, stop.y - b.min.y, stop.z - centre.z), rot);
+
+            if (paintBlack) RC_CarPaint.PaintBodyBlack(go, model);
+
+            // It moves, so its collider gets a kinematic body rather than being a static
+            // collider shoved around every frame.
+            var body = go.AddComponent<Rigidbody>();
+            body.isKinematic = true;
+            body.useGravity = false;
+
+            Debug.Log($"[Rooftop Contract] {name} = {model}: {b.size.x:0.00} x {b.size.y:0.00} x {b.size.z:0.00} m (W x H x L)");
+            return go.transform;
         }
 
         // ------------------------------------------------------------------ helipad venue

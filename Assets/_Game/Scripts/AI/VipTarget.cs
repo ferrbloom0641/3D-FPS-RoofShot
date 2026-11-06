@@ -41,7 +41,13 @@ namespace RooftopContract
             oneWayRoute && !routeFinished && !Evacuating && !health.IsDead && calmIndex < inPlayWaypoint;
 
         /// <summary>Seconds until he is in play, for the approach countdown.</summary>
-        public float SecondsUntilInPlay => SecondsToWaypoint(inPlayWaypoint);
+        public float SecondsUntilInPlay => arrivalDelay + SecondsToWaypoint(inPlayWaypoint);
+
+        /// <summary>
+        /// Seconds before he is even on foot — set every frame by <see cref="MotorcadeArrival"/>
+        /// while he is still being driven in, 0 otherwise.
+        /// </summary>
+        [NonSerialized] public float arrivalDelay;
 
         /// <summary>
         /// Which way he is travelling, flattened, or which way he is facing when stopped.

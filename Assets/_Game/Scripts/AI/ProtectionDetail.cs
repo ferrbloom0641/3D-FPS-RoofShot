@@ -43,8 +43,15 @@ namespace RooftopContract
         [Tooltip("대형이 완전히 좁혀지는 데 걸리는 시간 = 2번째 사격 기회 창")]
         public float shieldTightenTime = 1.5f;
 
+        [Header("Arrival")]
+        [Tooltip("켜져 있으면 경호대가 아직 차 안에 있다 (MotorcadeArrival 이 끈다). 그동안 대형을 짜지 않고, " +
+                 "첫 착탄은 기억해 뒀다가 모두 내린 순간 경보로 처리한다.")]
+        public bool holdForArrival;
+
         Vector3 threatPosition;
         bool alerted;
+        bool pendingAlert;
+        Vector3 pendingThreat;
         float alertClock;
         Transform threatProxy;
         readonly List<ProtectorGuard> alive = new();
@@ -65,6 +72,33 @@ namespace RooftopContract
         void OnFirstImpact(Vector3 shooterPosition)
         {
             if (alerted) return;
+
+            // Still in the cars: nobody can react yet, and the actors are switched off. Keep the
+            // shot and raise the alarm the moment they are all out.
+            if (holdForArrival)
+            {
+                pendingAlert = true;
+                pendingThreat = shooterPosition;
+                return;
+            }
+
+            Alert(shooterPosition);
+        }
+
+        /// <summary>Everyone is out of the motorcade. Called by <see cref="MotorcadeArrival"/>.</summary>
+        public void EndArrivalHold()
+        {
+            if (!holdForArrival) return;
+            holdForArrival = false;
+            if (pendingAlert)
+            {
+                pendingAlert = false;
+                Alert(pendingThreat);
+            }
+        }
+
+        void Alert(Vector3 shooterPosition)
+        {
             alerted = true;
             alertClock = 0f;
             threatPosition = shooterPosition;
@@ -81,7 +115,7 @@ namespace RooftopContract
 
         void Update()
         {
-            if (vip == null) return;
+            if (vip == null || holdForArrival) return;
 
             if (!alerted)
             {

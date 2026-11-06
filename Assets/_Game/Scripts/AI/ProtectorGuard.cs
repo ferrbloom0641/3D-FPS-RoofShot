@@ -60,7 +60,11 @@ namespace RooftopContract
 
         void Start()
         {
-            if (agent != null) agent.speed = calmSpeed;
+            // A guard who rode in with the motorcade is switched on mid-mission, and the detail
+            // can hand him an escort station or an alert in that same frame — before this runs.
+            // Resetting to the loitering pace then would leave him walking slower than the man
+            // he is meant to keep up with.
+            if (agent != null && !hasEscortSlot && !Alerted) agent.speed = calmSpeed;
         }
 
         void Update()
